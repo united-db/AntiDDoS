@@ -11,6 +11,8 @@ systemctl status nginx
 
 nano /etc/nginx/nginx.conf
 **************************************************************************
+#Sostituire Con le Righe Sottostanti
+**************************************************************************
 server {
         listen       80 default_server;
         listen       [::]:80 default_server;
