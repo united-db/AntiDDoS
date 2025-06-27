@@ -1,5 +1,4 @@
 # AntiDDoS
-# How to use
 ```
 cd /usr/local
 wget https://github.com/united-db/AntiDDoS/archive/refs/heads/master.zip
@@ -50,7 +49,7 @@ firewall-cmd --zone=public --permanent --add-service=https
 firewall-cmd --zone=public --permanent --list-services
 **************************************************************************
 nano /etc/firewalld/firewalld.conf
-sulla riga AllowZoneDrifting=yes sostituire yes con no
+#sulla riga AllowZoneDrifting=yes sostituire yes con no
 **************************************************************************
 firewall-cmd --zone=public --add-port=80/tcp --permanent
 firewall-cmd --zone=public --permanent --list-ports
@@ -89,7 +88,7 @@ ln -sf /usr/local/ddos/ban.ip.list /var/www/html/report.txt
 ln -s /usr/local/ddos/ignore.ip.list /root/
 **************************************************************************
 nano /etc/crontab
-****AGGIUNGERE RIGHE E SALVARE****
+#****AGGIUNGERE RIGHE E SALVARE****
 
 0-59/1 * * * * root /usr/local/ddos/ddos.sh
 0-59/1 * * * * root rm -rf /tmp/ban.*
@@ -113,14 +112,14 @@ cat /dev/null > ~/.bash_history && history -c && exit
 **************************************************************************
 **************************************************************************
 **************************************************************************
-CONTROLLO RICHIESTE IP:
+#CONTROLLO RICHIESTE IP:
 /usr/local/ddos/ddos.sh
 **************************************************************************
-LISTA IP BANNATI:
+#LISTA IP BANNATI:
 iptables -L INPUT -v -n
 http://localhost:11111/report.txt
 **************************************************************************
-SBANNARE UN IP:
+#SBANNARE UN IP:
 iptables -D INPUT -s IP_DA_SBANNARE -j DROP
 nano /usr/local/ddos/ban.ip.list
 **************************************************************************
