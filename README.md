@@ -1,8 +1,6 @@
 # AntiDDoS
 ```
-cd /usr/local
-wget https://github.com/united-db/AntiDDoS/archive/refs/heads/master.zip
-nano /etc/hosts
+yum update && yum Upgrade
 sudo hostnamectl set-hostname Proxy
 yum install wget vim nano perl-libwww-perl.noarch perl-Time-HiRes
 yum install epel-release
