@@ -32,22 +32,20 @@ showhelp()
   echo '-c | --cron: Create cron job to run this script regularly (default 1 mins)'
 }
 
-unbanip()
-{
-  UNBAN_SCRIPT=`mktemp /tmp/unban.XXXXXXXX`
-  TMP_FILE=`mktemp /tmp/unban.XXXXXXXX`
-  echo '#!/bin/sh' > $UNBAN_SCRIPT
-  echo "sleep $BAN_PERIOD" >> $UNBAN_SCRIPT
-  while read line; do
-    echo "$IPT -D INPUT -s $line -j DROP" >> $UNBAN_SCRIPT
-  done < $TMP_BANNED_IP_LIST
-  echo "grep -v --file=$TMP_BANNED_IP_LIST $BANNED_IP_LIST > $TMP_FILE" >> $UNBAN_SCRIPT
-  echo "mv $TMP_FILE $BANNED_IP_LIST" >> $UNBAN_SCRIPT
-  echo "rm -f $TMP_BANNED_IP_LIST" >> $UNBAN_SCRIPT
-  echo "rm -f $UNBAN_SCRIPT" >> $UNBAN_SCRIPT
-  echo "rm -f $TMP_FILE" >> $UNBAN_SCRIPT
-  . $UNBAN_SCRIPT &
-}
+if [ "$IP_BAN_NOW" -eq 1 ]; then
+  dt=$(date)
+
+  if [ -n "$EMAIL_TO" ]; then
+    mail -s "IP addresses banned on $dt" "$EMAIL_TO" < "$BANNED_IP_MAIL"
+  fi
+
+  # Sblocco automatico disabilitato
+  # unbanip
+
+  rm -f "$TMP_BANNED_IP_LIST"
+else
+  rm -f "$TMP_BANNED_IP_LIST"
+fi
 
 add_to_cron()
 {
