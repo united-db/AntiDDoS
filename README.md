@@ -1,8 +1,8 @@
 # Proxy Reverse Proxy + AntiDDoS — Ubuntu 22.04 LTS
 
-Installer interattivo per configurare una VPS Ubuntu 22.04 LTS come **reverse proxy HTTP Nginx**, con **Apache2 per il report** e **AntiDDoS basato su iptables**.
+Installer interattivo per configurare una VPS **Ubuntu 22.04 LTS** come **reverse proxy HTTP Nginx**, con **Apache2 per il report** e **AntiDDoS basato su iptables**.
 
-> **Ambito:** questa configurazione protegge e inoltra il traffico HTTP in ingresso sulla porta **80**. Non configura automaticamente HTTPS/TLS sulla porta 443, né fornisce protezione contro attacchi volumetrici che saturano la banda della VPS. L'installer non configura UFW o firewalld; eventuali firewall del provider e regole già presenti rimangono da verificare.
+> **Ambito:** questa configurazione protegge e inoltra il traffico HTTP in ingresso sulla porta **80**. Non configura automaticamente HTTPS/TLS sulla porta 443, né protegge da attacchi volumetrici che saturano la banda della VPS. L'installer non configura UFW o firewalld: verificare le regole firewall già presenti e quelle del provider.
 
 ## Architettura
 
@@ -20,49 +20,80 @@ VPS Proxy (Ubuntu 22.04)
 
 ## Prerequisiti
 
-- VPS con Ubuntu 22.04 LTS, accesso `root` e connettività ai repository APT e a GitHub.
+- VPS con Ubuntu 22.04 LTS e accesso `root` (o `sudo`).
+- Connettività ai repository APT e a GitHub (`raw.githubusercontent.com`).
 - Indirizzo IPv4 e porta HTTP del server originale da proteggere.
-- Porte necessarie abilitate nel firewall del provider: **80/TCP** per il proxy; **11111/TCP** solo se si desidera consultare il report da remoto.
-- Backup o snapshot della VPS prima dell'esecuzione, specialmente se Nginx o Apache2 sono già configurati.
+- Porta **80/TCP** abilitata nel firewall del provider. Abilitare **11111/TCP** solo se è necessario consultare il report da remoto, limitandola agli IP autorizzati.
+- Backup o snapshot della VPS prima dell'installazione, soprattutto se sono già presenti configurazioni Nginx, Apache2 o iptables.
 
-**Sicurezza:** il report contiene gli IP bloccati. È preferibile non esporre pubblicamente la porta 11111: consentire l'accesso solo al proprio IP di amministrazione mediante firewall del provider o altre restrizioni. Non pubblicare il report senza controllo degli accessi.
+**Sicurezza:** il report contiene gli indirizzi IP bloccati. Evitare di esporre la porta 11111 pubblicamente: limitarne l'accesso all'IP dell'amministratore o utilizzare un altro sistema di autenticazione/protezione.
 
-## Installazione automatica
+## Installazione automatica da GitHub
 
-Copiare `install_proxy_ubuntu22.sh` sulla VPS in /root, poi accedere come `root`:
+**Non è più necessario caricare o spostare manualmente lo script sulla VPS.** Collegarsi via SSH e ottenere una shell `root`:
 
 ```bash
 sudo -i
-cd /root
-chmod +x install_proxy_ubuntu22.sh
-bash ./install_proxy_ubuntu22.sh
 ```
 
-L'installer chiede:
+Quindi eseguire **questo unico comando**:
+
+```bash
+apt-get update && apt-get install -y wget && wget -O /root/install_proxy_ubuntu22.sh https://raw.githubusercontent.com/united-db/AntiDDoS/master/install_proxy_ubuntu22.sh && chmod +x /root/install_proxy_ubuntu22.sh && bash /root/install_proxy_ubuntu22.sh
+```
+
+Il comando:
+
+1. Aggiorna l'indice dei pacchetti APT e installa `wget` se manca.
+2. Scarica l'installer dal repository GitHub in `/root/install_proxy_ubuntu22.sh`.
+3. Rende eseguibile il file scaricato.
+4. Avvia la configurazione interattiva di proxy, report e AntiDDoS.
+
+Durante l'installazione vengono richiesti, ad esempio:
 
 ```text
 IP SERVER DA PROTEGGERE: 185.100.100.50
 PORTA SERVER DA PROTEGGERE [80]: 80
 ```
 
-Gli indirizzi sono **esempi**: usare i dati reali del proprio backend. Al termine Nginx invierà il traffico a `http://IP_BACKEND:PORTA`, e l'IP del backend sarà aggiunto alla whitelist AntiDDoS.
+Gli indirizzi sono **esempi**: inserire l'IP e la porta HTTP reali del backend. Nginx inoltrerà il traffico a `http://IP_BACKEND:PORTA` e l'IP del backend sarà aggiunto alla whitelist AntiDDoS.
 
-### Operazioni effettuate dallo script
+> **Attenzione:** il file viene scaricato dal ramo `master`, che può cambiare. Prima di eseguirlo con privilegi `root` su sistemi di produzione, è preferibile verificare il contenuto e fissare un commit GitHub attendibile. Scaricare uno script da Internet ed eseguirlo come root comporta rischi.
 
-1. Verifica i permessi di root e il sistema operativo (progettato per Ubuntu 22.04).
+### Aggiornamento dei pacchetti Ubuntu (facoltativo)
+
+Se si desidera aggiornare completamente i pacchetti di sistema **prima** di installare il proxy, eseguire separatamente:
+
+```bash
+apt update && apt upgrade -y && apt autoremove -y && apt autoclean
+```
+
+Questa operazione può aggiornare servizi già installati e rimuovere pacchetti non più necessari. Non è indispensabile per scaricare lo script; valutare un riavvio se richiesto dagli aggiornamenti.
+
+### Rieseguire un installer già scaricato
+
+Se il file è ancora presente in `/root`, non serve riscaricarlo:
+
+```bash
+bash /root/install_proxy_ubuntu22.sh
+```
+
+**Non rieseguire l'installer su una VPS già configurata senza backup:** potrebbe sovrascrivere impostazioni Nginx/Apache e ricreare l'installazione AntiDDoS. Questa non è una procedura di semplice aggiornamento.
+
+## Operazioni effettuate dallo script
+
+1. Verifica i privilegi `root` e rileva il sistema operativo (progettato per Ubuntu 22.04 LTS).
 2. Imposta l'hostname `Proxy` e aggiorna `/etc/hosts`.
-3. Salva una copia dei repository APT, converte specifici mirror Ubuntu HTTP in HTTPS, aggiorna l'indice APT e i pacchetti.
-4. Installa gli strumenti, Nginx, Apache2, PHP, iptables e cron.
-5. Richiede l'IP e la porta del server originale; prova a rilevare l'IP pubblico della VPS.
-6. Esegue un test preliminare del backend.
-7. Modifica il server block predefinito di Nginx per `proxy_pass http://IP_BACKEND:PORTA;` sulla porta 80.
-8. Configura Apache2 sulla porta 11111.
-9. Scarica `united-db/AntiDDoS` da GitHub in `/usr/local/ddos`, corregge la compatibilità Bash/Ubuntu e **rimuove la funzione di sblocco automatico `unbanip`**.
-10. Elimina `BAN_PERIOD` ed `EMAIL_TO` dalla configurazione AntiDDoS (niente timer di sban e niente notifiche email del vecchio script).
-11. Inserisce l'IP del server protetto in `ignore.ip.list`.
-12. Crea `/var/www/html/report.txt` come link all'elenco dei ban, configura cron, crea il comando `reset-antiddos-bans` ed esegue verifiche finali.
-
-**Nota:** lo script scarica il ramo `master` di AntiDDoS; poiché il contenuto remoto può cambiare, è consigliabile revisionarlo e fissare una versione verificata prima dell'uso in produzione.
+3. Salva una copia dei repository APT, converte specifici mirror Ubuntu da HTTP a HTTPS, aggiorna l'indice APT e i pacchetti.
+4. Installa gli strumenti necessari, Nginx, Apache2, PHP, iptables e cron.
+5. Richiede l'IP e la porta del backend e tenta di rilevare l'IP pubblico della VPS.
+6. Esegue un controllo preliminare del backend.
+7. Configura il server block predefinito Nginx per `proxy_pass http://IP_BACKEND:PORTA;` sulla porta 80.
+8. Configura Apache2 sulla porta 11111 per pubblicare il report.
+9. Installa `united-db/AntiDDoS` in `/usr/local/ddos`, applica le modifiche di compatibilità Bash/Ubuntu e rimuove la funzione di sblocco automatico `unbanip`.
+10. Elimina `BAN_PERIOD` ed `EMAIL_TO` dalla configurazione AntiDDoS.
+11. Aggiunge l'IP del backend a `ignore.ip.list`.
+12. Collega `/var/www/html/report.txt` all'elenco dei ban, configura cron, crea il comando `reset-antiddos-bans` ed esegue le verifiche finali.
 
 ## Porte e percorsi
 
@@ -77,11 +108,14 @@ Gli indirizzi sono **esempi**: usare i dati reali del proprio backend. Al termin
 | Pianificazione AntiDDoS | — | `/etc/cron.d/ddos.cron` |
 | Report | `11111/TCP` | `/var/www/html/report.txt` → `/usr/local/ddos/ban.ip.list` |
 | Riepilogo installazione | — | `/root/proxy-install-info.txt` (permessi 600) |
+| Installer scaricato | — | `/root/install_proxy_ubuntu22.sh` |
 
 ## Controlli dopo l'installazione
 
+Verificare servizi, configurazioni e porte in ascolto:
+
 ```bash
-systemctl status nginx apache2 cron
+systemctl status nginx apache2 cron --no-pager
 nginx -t
 apache2ctl configtest
 ss -lntp | grep -E ':80\b|:11111\b'
@@ -94,13 +128,13 @@ grep -n 'proxy_pass' /etc/nginx/sites-available/default
 curl -I http://127.0.0.1/
 ```
 
-Controllare il report locale:
+Verificare il report locale:
 
 ```bash
 curl http://127.0.0.1:11111/report.txt
 ```
 
-Da remoto, **solo se la porta è consentita e opportunamente protetta**:
+Da remoto, **soltanto se l'accesso è stato limitato e autorizzato**:
 
 ```text
 http://IP_PUBBLICO_VPS:11111/report.txt
@@ -121,9 +155,9 @@ cat /usr/local/ddos/ban.ip.list
 iptables -L INPUT -v -n --line-numbers
 ```
 
-### Sbloccare un solo IP
+### Sbloccare un singolo IP
 
-Sostituire `203.0.113.10` con l'IP effettivo:
+Sostituire `203.0.113.10` con un indirizzo reale da sbloccare:
 
 ```bash
 IP="203.0.113.10"
@@ -131,15 +165,19 @@ iptables -D INPUT -s "$IP" -j DROP
 sed -i "\\|^${IP//./\\.}$|d" /usr/local/ddos/ban.ip.list
 ```
 
-Il comando `iptables -D` rimuove **una** regola corrispondente; se esistono più regole DROP identiche, verificare con `iptables -C` e rimuovere le eventuali duplicazioni. Assicurarsi inoltre di togliere l'IP dal file dei ban, altrimenti AntiDDoS continuerà a considerarlo già bannato.
+`iptables -D` rimuove una sola regola corrispondente. Se ci sono regole DROP duplicate, verificarle prima di rimuoverle. Eliminare anche l'IP dal file dei ban per mantenere coerenti elenco e firewall.
 
 ### Sbloccare tutti gli IP AntiDDoS
+
+**Solo quando si desidera davvero azzerare i ban:**
 
 ```bash
 reset-antiddos-bans
 ```
 
-Questo comando rimuove le regole `INPUT DROP` relative agli indirizzi contenuti in `ban.ip.list` e svuota l'elenco. Non equivale a cancellare tutto il firewall e non rimuove necessariamente ogni altra regola DROP del sistema.
+Il comando rimuove le regole `INPUT DROP` riferite agli IP presenti in `ban.ip.list` e svuota l'elenco. Non cancella tutto il firewall né necessariamente altre regole DROP.
+
+**Non eseguire automaticamente `truncate -s 0 /var/www/html/report.txt`:** il report è un link simbolico al file `ban.ip.list`; svuotarlo direttamente può rendere incoerente lo stato dei ban rispetto a iptables. Utilizzare invece `reset-antiddos-bans` quando è necessario il reset.
 
 ### Modificare la whitelist
 
@@ -147,7 +185,7 @@ Questo comando rimuove le regole `INPUT DROP` relative agli indirizzi contenuti 
 nano /usr/local/ddos/ignore.ip.list
 ```
 
-Inserire **un IPv4 per riga**. Il backend configurato durante l'installazione viene aggiunto automaticamente. Per visualizzare gli IP ignorati:
+Inserire un IPv4 per riga. Il backend viene aggiunto automaticamente durante l'installazione. Per leggere la lista:
 
 ```bash
 cat /usr/local/ddos/ignore.ip.list
@@ -159,33 +197,31 @@ cat /usr/local/ddos/ignore.ip.list
 nano /usr/local/ddos/ddos.conf
 ```
 
-Controllare il valore di `NO_OF_CONNECTIONS` e gli altri parametri disponibili nella versione installata. **Non** aggiungere `BAN_PERIOD` come soluzione per rendere persistenti i ban: l'installer elimina la funzione di sblocco temporizzato.
+Controllare `NO_OF_CONNECTIONS` e gli altri parametri disponibili. Non reinserire `BAN_PERIOD` per rendere persistenti i ban: l'installer disabilita lo sblocco temporizzato.
 
 ### Verificare il cron
 
 ```bash
 cat /etc/cron.d/ddos.cron
-systemctl status cron
+systemctl status cron --no-pager
 ```
 
-La frequenza effettiva dipende da `FREQ` in `ddos.conf` e dal cron generato da `ddos.sh -c` (impostazione prevista: ogni minuto). **Non aggiungere una seconda voce in `/etc/crontab`** se il job esiste già, per evitare esecuzioni duplicate.
+La frequenza effettiva dipende dal valore `FREQ` in `ddos.conf` e dal cron generato da `ddos.sh -c` (frequenza prevista: ogni minuto). **Non aggiungere un secondo job in `/etc/crontab`** se esiste già quello configurato.
 
 ## Ban permanenti: cosa significa
 
-Nella versione installata, AntiDDoS **non pianifica più uno sblocco dopo `BAN_PERIOD`**. I ban rimangono applicati fino a un intervento manuale o a un reset.
+AntiDDoS, nella versione predisposta dall'installer, **non programma più lo sblocco automatico in base a `BAN_PERIOD`**. I ban restano attivi finché le relative regole firewall non vengono rimosse o il firewall viene ripristinato.
 
-**Attenzione al riavvio:** l'installer attuale non configura la persistenza delle regole iptables, né il loro ripristino dal file `ban.ip.list` al boot. Dopo un riavvio, le regole potrebbero sparire, anche se l'IP resta nel file dei ban. Per garantire una protezione coerente dopo il reboot occorre progettare e testare un meccanismo separato di salvataggio/ripristino o risincronizzazione, tenendo conto delle altre regole firewall già presenti.
+**Dopo un riavvio:** l'installer non garantisce la persistenza o il ripristino delle regole iptables. Le regole possono sparire mentre gli IP restano in `ban.ip.list`. Occorre un meccanismo separato di persistenza o risincronizzazione, da progettare e testare tenendo conto delle altre regole firewall.
 
 ## Gestione servizi
 
 ```bash
-systemctl restart nginx
-systemctl restart apache2
-systemctl restart cron
-systemctl status nginx apache2 cron
+systemctl restart nginx apache2 cron
+systemctl status nginx apache2 cron --no-pager
 ```
 
-Log utili:
+Per consultare i log:
 
 ```bash
 journalctl -u nginx -n 100 --no-pager
@@ -195,31 +231,30 @@ tail -n 100 /var/log/nginx/error.log
 tail -n 100 /var/log/apache2/error.log
 ```
 
-**Non usare** i vecchi cron che cancellavano ogni minuto `/tmp/systemd-private*`, la cronologia della shell o i log di audit, accesso e sicurezza: possono interferire con i servizi e impedire diagnosi e analisi degli incidenti. Per la rotazione dei log utilizzare `logrotate` e le configurazioni standard di Ubuntu.
+Non utilizzare vecchi cron che cancellano indiscriminatamente `/tmp/systemd-private*`, cronologia della shell o log di audit e sicurezza: possono interrompere servizi e impedire diagnosi. Usare `logrotate` per gestire i log.
 
 ## Backup e ripristino
 
-Durante l'installazione vengono create copie di backup, marcate con data e ora, dei file Nginx/Apache modificati, dell'eventuale directory AntiDDoS esistente e dei repository APT. Nel riepilogo finale sono riportati i percorsi dei backup.
-
-Per esaminare i dati di configurazione scelti:
+Durante l'installazione lo script crea backup con data e ora dei file Nginx/Apache modificati, delle eventuali configurazioni precedenti AntiDDoS e dei repository APT. Verificare i percorsi riportati nel riepilogo dell'installer.
 
 ```bash
 cat /root/proxy-install-info.txt
 ```
 
-Prima di rieseguire l'installer su una macchina configurata, eseguire un backup completo: lo script sovrascrive il server block predefinito Nginx, interviene sulle impostazioni Apache e sostituisce la directory AntiDDoS (dopo averne creato il backup).
+Prima di ripetere l'installazione su una macchina già configurata, eseguire uno snapshot o backup completo. Lo script può sostituire il server block Nginx predefinito, modificare Apache2 e sostituire la directory AntiDDoS dopo averne creato una copia.
 
 ## Note e limiti di sicurezza
 
-- Il proxy è **HTTP**: HTTPS non viene configurato automaticamente.
-- Il solo `iptables DROP` non garantisce mitigazione di attacchi DDoS volumetrici; per questi servono protezioni di rete a monte.
-- La whitelist AntiDDoS riguarda lo script di ban, **non** costituisce di per sé una regola firewall `ACCEPT`.
-- Il server originale deve essere configurato per accettare il traffico dal proxy e, se richiesto, evitare l'accesso pubblico diretto che aggirerebbe il proxy.
-- Lo script originale AntiDDoS è datato: la classificazione tramite numero di connessioni può causare falsi positivi (es. utenti dietro NAT). Verificare soglie e comportamento prima di affidargli traffico importante.
-- Lo script non configura automaticamente il firewall del provider né un servizio generale di gestione firewall.
+- Questa soluzione configura il proxy **HTTP**, non HTTPS/TLS.
+- Le regole `iptables DROP` non mitigano gli attacchi DDoS che saturano la connettività a monte della VPS.
+- La whitelist AntiDDoS evita i ban generati dallo script; non equivale a una regola firewall generale `ACCEPT`.
+- Proteggere il backend da accessi diretti non autorizzati, se si vuole obbligare il traffico a passare dal proxy.
+- Le soglie basate sul numero di connessioni possono provocare falsi positivi, in particolare per client dietro NAT.
+- Non vengono configurati il firewall del provider, UFW o firewalld.
+- Il ramo GitHub `master` può variare: in produzione verificare il codice prima di eseguirlo con privilegi `root`.
 
 ## Progetto upstream
 
-AntiDDoS: https://github.com/united-db/AntiDDoS
-
-Installer locale: `install_proxy_ubuntu22.sh`.
+- Repository AntiDDoS: https://github.com/united-db/AntiDDoS
+- Installer automatico: https://raw.githubusercontent.com/united-db/AntiDDoS/master/install_proxy_ubuntu22.sh
+- File locale dopo il download: `/root/install_proxy_ubuntu22.sh`
