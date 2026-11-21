@@ -7,6 +7,8 @@ DDOS_DIR=/usr/local/ddos
 CONF="$DDOS_DIR/ddos.conf"
 BANNED_IP_LIST="$DDOS_DIR/ban.ip.list"
 IGNORE_IP_LIST="$DDOS_DIR/ignore.ip.list"
+# Range Cloudflare (generato da update-cloudflare-ips). Supporta CIDR.
+CF_IP_LIST="$DDOS_DIR/cloudflare.ip.list"
 CRON=/etc/cron.d/ddos.cron
 
 usage() {
@@ -101,6 +103,51 @@ is_reserved() {
      (a == 192 && b == 168) ))
 }
 
+ip_to_int() {
+  local a b c d
+  IFS=. read -r a b c d <<< "$1"
+  echo $(( (10#$a << 24) | (10#$b << 16) | (10#$c << 8) | 10#$d ))
+}
+
+# Whitelist: IP singoli e reti CIDR IPv4 (ignore.ip.list + cloudflare.ip.list).
+# Righe vuote e commenti (#) ignorati.
+declare -A ignore_exact=()
+ignore_nets=()
+load_ignore() {
+  local file line ip bits mask
+  for file in "$IGNORE_IP_LIST" "$CF_IP_LIST"; do
+    [[ -r "$file" ]] || continue
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      line=${line%%#*}
+      line=${line//[[:space:]]/}
+      [[ -n "$line" ]] || continue
+      if [[ "$line" == */* ]]; then
+        ip=${line%/*}; bits=${line#*/}
+        is_ipv4 "$ip" || continue
+        [[ "$bits" =~ ^[0-9]{1,2}$ ]] && (( 10#$bits <= 32 )) || continue
+        bits=$((10#$bits))
+        mask=$(( (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF ))
+        ignore_nets+=("$(( $(ip_to_int "$ip") & mask )) $mask")
+      elif is_ipv4 "$line"; then
+        ignore_exact["$line"]=1
+      fi
+    done < "$file"
+  done
+}
+
+is_ignored() {
+  local ip=$1 n entry net mask
+  [[ -n "${ignore_exact[$ip]:-}" ]] && return 0
+  n=$(ip_to_int "$ip")
+  for entry in "${ignore_nets[@]}"; do
+    read -r net mask <<< "$entry"
+    (( (n & mask) == net )) && return 0
+  done
+  return 1
+}
+
+load_ignore
+
 # Indici FILTER_STATE previsti dal progetto originale.
 STATES=(all connected synchronized syn-sent syn-recv established fin-wait-1 fin-wait-2 time-wait close-wait last-ack closing closed)
 IFS=: read -r -a selected <<< "$FILTER_STATE"
@@ -135,7 +182,7 @@ done | sort -k1,1nr -k2,2 | while read -r connections ip; do
   printf '%6d %s\n' "$connections" "$ip"
   (( connections >= NO_OF_CONNECTIONS )) || continue
   if [[ "$IGNORE_DEFAULT_IP" == 1 ]] && is_reserved "$ip"; then continue; fi
-  grep -Fqx -- "$ip" "$IGNORE_IP_LIST" && continue
+  is_ignored "$ip" && continue
   grep -Fqx -- "$ip" "$BANNED_IP_LIST" && continue
 
   if "$IPT" -C INPUT -s "$ip" -j DROP 2>/dev/null; then
