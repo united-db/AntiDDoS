@@ -54,9 +54,46 @@ Durante l'installazione vengono richiesti, ad esempio:
 ```text
 IP SERVER DA PROTEGGERE: 185.100.100.50
 PORTA SERVER DA PROTEGGERE [80]: 80
+PROXY DIETRO CLOUDFLARE? [S/n]: S
 ```
 
 Gli indirizzi sono **esempi**: inserire l'IP e la porta HTTP reali del backend. Nginx inoltrerà il traffico a `http://IP_BACKEND:PORTA` e l'IP del backend sarà aggiunto alla whitelist AntiDDoS.
+
+Rispondere **S** alla domanda Cloudflare se l'IP del proxy verrà inserito su Cloudflare con la nuvola arancione (vedi [Uso con Cloudflare](#uso-con-cloudflare)).
+
+## Uso con Cloudflare
+
+Schema con doppia protezione:
+
+```text
+Visitatore -> Cloudflare -> VPS Proxy (Nginx + AntiDDoS) -> Server originale
+```
+
+Rispondendo **S** alla domanda `PROXY DIETRO CLOUDFLARE?` l'installer:
+
+1. Crea il comando `update-cloudflare-ips`, che scarica i range ufficiali da `cloudflare.com/ips-v4` e `ips-v6` (con elenco di riserva se il download non riesce).
+2. Genera `/etc/nginx/conf.d/cloudflare-realip.conf` con `set_real_ip_from` e `real_ip_header CF-Connecting-IP`: Nginx vede l'IP reale del visitatore.
+3. Genera `/usr/local/ddos/cloudflare.ip.list`: AntiDDoS **non banna mai i nodi Cloudflare**. Senza questa whitelist tutte le connessioni arriverebbero dagli IP Cloudflare e verrebbero bannate, mandando offline il sito.
+4. Invia al backend `X-Real-IP`, `X-Forwarded-For` e `CF-Connecting-IP` con l'IP reale del visitatore e `X-Forwarded-Proto` con il protocollo originale (`https` se il visitatore usa HTTPS su Cloudflare).
+5. Configura `/etc/cron.d/cloudflare-ips` per aggiornare i range ogni lunedì alle 04:17.
+
+Configurazione su Cloudflare:
+
+- Record **A** del dominio → **IP pubblico del proxy**, nuvola **arancione** (Proxied).
+- **SSL/TLS → Flexible**: il proxy ascolta solo sulla porta 80, con *Full* / *Full (strict)* il sito restituisce errore 521/525.
+- Nessun record DNS (A, `mail`, `ftp`, `cpanel`...) deve puntare all'IP del server originale.
+- Sul server originale consentire la porta HTTP **solo dall'IP del proxy**.
+
+Comandi utili:
+
+```bash
+update-cloudflare-ips                              # aggiorna subito i range Cloudflare
+cat /etc/nginx/conf.d/cloudflare-realip.conf       # configurazione real_ip
+cat /usr/local/ddos/cloudflare.ip.list             # range esclusi dai ban
+tail -f /var/log/nginx/access.log                  # devono comparire gli IP reali dei visitatori
+```
+
+Gli attacchi che passano da Cloudflare vanno mitigati su Cloudflare (WAF, rate limiting, *Under Attack mode*); AntiDDoS sul proxy blocca chi attacca direttamente l'IP del proxy.
 
 > **Attenzione:** il file viene scaricato dal ramo `master`, che può cambiare. Prima di eseguirlo con privilegi `root` su sistemi di produzione, è preferibile verificare il contenuto e fissare un commit GitHub attendibile. Scaricare uno script da Internet ed eseguirlo come root comporta rischi.
 
@@ -86,13 +123,13 @@ bash /root/install_proxy_ubuntu22.sh
 2. Imposta l'hostname `Proxy` e aggiorna `/etc/hosts`.
 3. Salva una copia dei repository APT, converte specifici mirror Ubuntu da HTTP a HTTPS, aggiorna l'indice APT e i pacchetti.
 4. Installa gli strumenti necessari, Nginx, Apache2, PHP, iptables e cron.
-5. Richiede l'IP e la porta del backend e tenta di rilevare l'IP pubblico della VPS.
+5. Richiede l'IP e la porta del backend, se il proxy è dietro Cloudflare, e tenta di rilevare l'IP pubblico della VPS.
 6. Esegue un controllo preliminare del backend.
-7. Configura il server block predefinito Nginx per `proxy_pass http://IP_BACKEND:PORTA;` sulla porta 80.
+7. Se richiesto, configura Cloudflare real IP (`update-cloudflare-ips`), poi il server block predefinito Nginx per `proxy_pass http://IP_BACKEND:PORTA;` sulla porta 80.
 8. Configura Apache2 sulla porta 11111 per pubblicare il report.
 9. Installa `united-db/AntiDDoS` in `/usr/local/ddos`, applica le modifiche di compatibilità Bash/Ubuntu e rimuove la funzione di sblocco automatico `unbanip`.
 10. Elimina `BAN_PERIOD` ed `EMAIL_TO` dalla configurazione AntiDDoS.
-11. Aggiunge l'IP del backend a `ignore.ip.list`.
+11. Aggiunge l'IP del backend a `ignore.ip.list` e, con Cloudflare, i range Cloudflare a `cloudflare.ip.list`.
 12. Collega `/var/www/html/report.txt` all'elenco dei ban, configura cron, crea il comando `reset-antiddos-bans` ed esegue le verifiche finali.
 
 ## Porte e percorsi
@@ -104,7 +141,10 @@ bash /root/install_proxy_ubuntu22.sh
 | AntiDDoS | — | `/usr/local/ddos/ddos.sh` |
 | Configurazione AntiDDoS | — | `/usr/local/ddos/ddos.conf` |
 | IP bannati | — | `/usr/local/ddos/ban.ip.list` |
-| IP esclusi dai ban | — | `/usr/local/ddos/ignore.ip.list` |
+| IP esclusi dai ban | — | `/usr/local/ddos/ignore.ip.list` (IP singoli o CIDR) |
+| Range Cloudflare esclusi dai ban | — | `/usr/local/ddos/cloudflare.ip.list` |
+| Cloudflare real IP (Nginx) | — | `/etc/nginx/conf.d/cloudflare-realip.conf` |
+| Aggiornamento range Cloudflare | — | `/usr/local/sbin/update-cloudflare-ips` e `/etc/cron.d/cloudflare-ips` |
 | Pianificazione AntiDDoS | — | `/etc/cron.d/ddos.cron` |
 | Report | `11111/TCP` | `/var/www/html/report.txt` → `/usr/local/ddos/ban.ip.list` |
 | Riepilogo installazione | — | `/root/proxy-install-info.txt` (permessi 600) |
@@ -177,7 +217,21 @@ reset-antiddos-bans
 
 Il comando rimuove le regole `INPUT DROP` riferite agli IP presenti in `ban.ip.list` e svuota l'elenco. Non cancella tutto il firewall né necessariamente altre regole DROP.
 
-**Non eseguire automaticamente `truncate -s 0 /var/www/html/report.txt`:** il report è un link simbolico al file `ban.ip.list`; svuotarlo direttamente può rendere incoerente lo stato dei ban rispetto a iptables. Utilizzare invece `reset-antiddos-bans` quando è necessario il reset.
+### Reset completo: sblocco IP, pulizia report e riavvio servizi
+
+Comando unico che sbanna tutti gli IP AntiDDoS, svuota il report `report.txt`, riavvia Nginx, Apache2 e cron, esegue subito un nuovo controllo AntiDDoS e mostra lo stato dei servizi:
+
+```bash
+reset-antiddos-bans && truncate -s 0 /var/www/html/report.txt && systemctl restart nginx apache2 cron && /usr/local/ddos/ddos.sh; systemctl status nginx apache2 cron --no-pager
+```
+
+- `reset-antiddos-bans` rimuove le regole DROP da iptables e svuota `ban.ip.list`.
+- `truncate -s 0 /var/www/html/report.txt` svuota il report (link simbolico a `ban.ip.list`).
+- `systemctl restart nginx apache2 cron` riavvia i servizi.
+- `/usr/local/ddos/ddos.sh` esegue subito un nuovo controllo: gli IP che superano ancora la soglia vengono bannati di nuovo.
+- `systemctl status ... --no-pager` mostra lo stato finale. È separato con `;` perché, se un servizio non è attivo, `systemctl status` restituisce un errore che con `&&` bloccherebbe il comando precedente.
+
+**Non eseguire `truncate -s 0 /var/www/html/report.txt` da solo:** il report è un link simbolico al file `ban.ip.list`; svuotarlo senza `reset-antiddos-bans` lascia le regole DROP attive in iptables e rende incoerente l'elenco dei ban. Usarlo sempre dopo `reset-antiddos-bans`, come nel comando sopra.
 
 ### Modificare la whitelist
 
@@ -185,7 +239,7 @@ Il comando rimuove le regole `INPUT DROP` riferite agli IP presenti in `ban.ip.l
 nano /usr/local/ddos/ignore.ip.list
 ```
 
-Inserire un IPv4 per riga. Il backend viene aggiunto automaticamente durante l'installazione. Per leggere la lista:
+Inserire un IPv4 o una rete CIDR (es. `203.0.113.0/24`) per riga; le righe che iniziano con `#` sono commenti. Il backend viene aggiunto automaticamente durante l'installazione. I range Cloudflare sono in `cloudflare.ip.list`, rigenerato da `update-cloudflare-ips`: non modificarlo a mano. Per leggere la lista:
 
 ```bash
 cat /usr/local/ddos/ignore.ip.list
