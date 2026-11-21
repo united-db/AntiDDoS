@@ -317,10 +317,31 @@ while true; do
 done
 
 echo
+echo "Se l'IP di questo proxy viene inserito su Cloudflare con la nuvola"
+echo "ARANCIONE (proxied), rispondere S: Nginx leggerà l'IP reale del"
+echo "visitatore da CF-Connecting-IP e AntiDDoS non bannerà mai i nodi Cloudflare."
+echo
+
+while true; do
+    read -rp "PROXY DIETRO CLOUDFLARE? [S/n]: " CF_ANSWER
+    CF_ANSWER="${CF_ANSWER:-S}"
+    case "${CF_ANSWER,,}" in
+        s|si|sì|y|yes) USE_CLOUDFLARE=1; break ;;
+        n|no)          USE_CLOUDFLARE=0; break ;;
+        *) warn "Rispondere S oppure N." ;;
+    esac
+done
+
+echo
 echo "----------------------------------------------------------------------"
 echo "SERVER DA PROTEGGERE: ${BACKEND_IP}:${BACKEND_PORT}"
 echo "PROXY_PASS:            http://${BACKEND_IP}:${BACKEND_PORT};"
 echo "WHITELIST ANTIDDOS:    ${BACKEND_IP}"
+if [[ ${USE_CLOUDFLARE} -eq 1 ]]; then
+echo "CLOUDFLARE:            SI (real_ip + whitelist range Cloudflare)"
+else
+echo "CLOUDFLARE:            NO"
+fi
 echo "----------------------------------------------------------------------"
 echo
 
@@ -359,7 +380,8 @@ Server protetto: ${BACKEND_IP}
 Porta server protetto: ${BACKEND_PORT}
 Proxy Pass: http://${BACKEND_IP}:${BACKEND_PORT}
 Whitelist AntiDDoS: ${BACKEND_IP}
-Report: http://${PROXY_PUBLIC_IP:-IP_PUBBLICO_VPS}:11111/report.txt
+Cloudflare: $([[ ${USE_CLOUDFLARE} -eq 1 ]] && echo SI || echo NO)
+Report:http://${PROXY_PUBLIC_IP:-IP_PUBBLICO_VPS}:11111/report.txt
 INFOEOF
 chmod 600 "${INSTALL_INFO}"
 
@@ -380,6 +402,137 @@ else
 fi
 
 ###############################################################################
+# CLOUDFLARE - REAL IP + WHITELIST RANGE
+#
+# - /usr/local/sbin/update-cloudflare-ips scarica i range ufficiali
+#   (https://www.cloudflare.com/ips-v4 e ips-v6), con elenco di riserva
+#   incorporato se il download non riesce.
+# - Genera /etc/nginx/conf.d/cloudflare-realip.conf (set_real_ip_from +
+#   real_ip_header CF-Connecting-IP).
+# - Genera /usr/local/ddos/cloudflare.ip.list (letto da ddos.sh, CIDR).
+# - Cron settimanale per mantenere aggiornati i range.
+###############################################################################
+
+CF_UPDATE_SCRIPT="/usr/local/sbin/update-cloudflare-ips"
+CF_NGINX_CONF="/etc/nginx/conf.d/cloudflare-realip.conf"
+CF_DDOS_LIST="${DDOS_DIR}/cloudflare.ip.list"
+CF_CRON="/etc/cron.d/cloudflare-ips"
+
+if [[ ${USE_CLOUDFLARE} -eq 1 ]]; then
+
+separator "CONFIGURAZIONE CLOUDFLARE REAL IP"
+
+cat > "${CF_UPDATE_SCRIPT}" <<'CFEOF'
+#!/usr/bin/env bash
+# Aggiorna i range IP Cloudflare per Nginx (real_ip) e per la whitelist AntiDDoS.
+set -Eeuo pipefail
+
+NGINX_CONF="/etc/nginx/conf.d/cloudflare-realip.conf"
+DDOS_DIR="/usr/local/ddos"
+DDOS_LIST="${DDOS_DIR}/cloudflare.ip.list"
+
+# Elenco di riserva (usato solo se il download da cloudflare.com fallisce).
+FALLBACK_V4="173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22
+141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20
+197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13
+104.24.0.0/14 172.64.0.0/13 131.0.72.0/22"
+FALLBACK_V6="2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32
+2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32"
+
+fetch_list() {
+    curl -4 -fsS --connect-timeout 10 --max-time 20 "$1" 2>/dev/null \
+        | tr -d '\r' | grep -E "$2" || true
+}
+
+V4="$(fetch_list https://www.cloudflare.com/ips-v4 '^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$')"
+V6="$(fetch_list https://www.cloudflare.com/ips-v6 '^[0-9a-fA-F:]+/[0-9]{1,3}$')"
+
+SOURCE="cloudflare.com"
+if (( $(printf '%s\n' "$V4" | grep -c . || true) < 10 )) || \
+   (( $(printf '%s\n' "$V6" | grep -c . || true) < 3 )); then
+    echo "[ATTENZIONE] Download range Cloudflare non riuscito: uso l'elenco di riserva."
+    V4="$(printf '%s\n' $FALLBACK_V4)"
+    V6="$(printf '%s\n' $FALLBACK_V6)"
+    SOURCE="elenco di riserva"
+fi
+
+TMP_CONF="$(mktemp)"
+trap 'rm -f "$TMP_CONF"' EXIT
+
+{
+    echo "# Generato da update-cloudflare-ips - NON MODIFICARE A MANO"
+    echo "# Aggiornato: $(date '+%Y-%m-%d %H:%M:%S') - fonte: ${SOURCE}"
+    echo
+    while IFS= read -r net; do
+        [[ -n "$net" ]] && echo "set_real_ip_from ${net};"
+    done <<< "$V4"$'\n'"$V6"
+    echo
+    echo "real_ip_header CF-Connecting-IP;"
+    echo
+    echo "# Protocollo originale del visitatore (https se SSL Flexible/Full)."
+    echo "map \$http_x_forwarded_proto \$cf_forwarded_proto {"
+    echo "    default \$http_x_forwarded_proto;"
+    echo "    \"\"      \$scheme;"
+    echo "}"
+} > "$TMP_CONF"
+
+BACKUP=""
+if [[ -f "$NGINX_CONF" ]]; then
+    BACKUP="${NGINX_CONF}.prev"
+    cp -a "$NGINX_CONF" "$BACKUP"
+fi
+
+install -m 644 "$TMP_CONF" "$NGINX_CONF"
+
+if ! nginx -t >/dev/null 2>&1; then
+    echo "[ERRORE] Configurazione Nginx non valida dopo l'aggiornamento Cloudflare." >&2
+    if [[ -n "$BACKUP" ]]; then
+        cp -a "$BACKUP" "$NGINX_CONF"
+    else
+        rm -f "$NGINX_CONF"
+    fi
+    nginx -t || true
+    exit 1
+fi
+
+if systemctl is-active --quiet nginx; then
+    systemctl reload nginx
+fi
+
+# Whitelist AntiDDoS (solo IPv4: ddos.sh valuta solo peer IPv4).
+if [[ -d "$DDOS_DIR" ]]; then
+    {
+        echo "# Range Cloudflare - generato da update-cloudflare-ips"
+        printf '%s\n' "$V4"
+    } > "${DDOS_LIST}.tmp"
+    chmod 644 "${DDOS_LIST}.tmp"
+    mv -f "${DDOS_LIST}.tmp" "$DDOS_LIST"
+fi
+
+echo "Range Cloudflare aggiornati (fonte: ${SOURCE})."
+echo "  Nginx:    ${NGINX_CONF}"
+[[ -d "$DDOS_DIR" ]] && echo "  AntiDDoS: ${DDOS_LIST}"
+exit 0
+CFEOF
+
+chmod 755 "${CF_UPDATE_SCRIPT}"
+ok "Comando creato: ${CF_UPDATE_SCRIPT}"
+
+"${CF_UPDATE_SCRIPT}" || fail "Configurazione Cloudflare real_ip non riuscita."
+ok "Nginx: real_ip_header CF-Connecting-IP configurato."
+
+else
+
+# Se una installazione precedente aveva Cloudflare attivo, la rimuove.
+if [[ -f "${CF_NGINX_CONF}" ]]; then
+    mv "${CF_NGINX_CONF}" "/root/cloudflare-realip.conf.${STAMP}.bak"
+    warn "Rimosso ${CF_NGINX_CONF} (backup in /root)."
+fi
+rm -f "${CF_CRON}" "${CF_UPDATE_SCRIPT}"
+
+fi
+
+###############################################################################
 # NGINX - MODIFICA SOLO SERVER BLOCK PREDEFINITO UBUNTU
 ###############################################################################
 
@@ -390,7 +543,7 @@ separator "CONFIGURAZIONE NGINX"
 backup_file "${NGINX_SITE}"
 NGINX_BACKUP="${NGINX_SITE}.${STAMP}.bak"
 
-export BACKEND_IP BACKEND_PORT NGINX_SITE
+export BACKEND_IP BACKEND_PORT NGINX_SITE USE_CLOUDFLARE
 
 python3 <<'PY'
 import os
@@ -400,6 +553,20 @@ import sys
 path = os.environ["NGINX_SITE"]
 backend_ip = os.environ["BACKEND_IP"]
 backend_port = os.environ["BACKEND_PORT"]
+use_cf = os.environ.get("USE_CLOUDFLARE") == "1"
+
+if use_cf:
+    # Con real_ip attivo $remote_addr è già l'IP reale del visitatore.
+    # XFF e CF-Connecting-IP vengono riscritti per non inoltrare al backend
+    # valori falsificati da chi contatta il proxy direttamente.
+    fwd_headers = '''                proxy_set_header X-Real-IP         $remote_addr;
+                proxy_set_header X-Forwarded-For   $remote_addr;
+                proxy_set_header CF-Connecting-IP  $remote_addr;
+                proxy_set_header X-Forwarded-Proto $cf_forwarded_proto;'''
+else:
+    fwd_headers = '''                proxy_set_header X-Real-IP         $remote_addr;
+                proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;'''
 
 with open(path, "r", encoding="utf-8") as f:
     text = f.read()
@@ -497,9 +664,7 @@ new_server = f'''server {{
                 proxy_set_header Upgrade           $http_upgrade;
                 proxy_set_header Connection        "upgrade";
                 proxy_set_header Host              $host;
-                proxy_set_header X-Real-IP         $remote_addr;
-                proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
-                proxy_set_header X-Forwarded-Proto $scheme;
+{fwd_headers}
                 proxy_set_header X-Forwarded-Host  $host;
                 proxy_set_header X-Forwarded-Port  $server_port;
         }}
@@ -776,6 +941,31 @@ cat "${IGNORE_FILE}"
 echo
 
 ###############################################################################
+# WHITELIST CLOUDFLARE ANTIDDOS + CRON AGGIORNAMENTO RANGE
+###############################################################################
+
+if [[ ${USE_CLOUDFLARE} -eq 1 ]]; then
+    separator "WHITELIST ANTIDDOS CLOUDFLARE"
+
+    # Senza supporto CIDR ddos.sh bannerebbe i nodi Cloudflare (sito offline).
+    grep -q 'CF_IP_LIST' "${DDOS_DIR}/ddos.sh" || \
+        fail "ddos.sh scaricato non supporta cloudflare.ip.list: aggiornare il repository."
+
+    "${CF_UPDATE_SCRIPT}" || fail "Generazione ${CF_DDOS_LIST} non riuscita."
+    [[ -s "${CF_DDOS_LIST}" ]] || fail "${CF_DDOS_LIST} vuoto."
+
+    cat > "${CF_CRON}" <<CFCRONEOF
+SHELL=/bin/bash
+# Aggiornamento settimanale range IP Cloudflare (Nginx real_ip + AntiDDoS)
+17 4 * * 1 root ${CF_UPDATE_SCRIPT} >/var/log/update-cloudflare-ips.log 2>&1
+CFCRONEOF
+    chmod 644 "${CF_CRON}"
+
+    ok "Range Cloudflare in whitelist: ${CF_DDOS_LIST}"
+    ok "Cron aggiornamento range: ${CF_CRON}"
+fi
+
+###############################################################################
 # REPORT
 ###############################################################################
 
@@ -929,6 +1119,16 @@ echo "IP immune:      ${BACKEND_IP}"
 echo "File:           ${IGNORE_FILE}"
 echo "Link rapido:    /root/ignore.ip.list"
 echo
+if [[ ${USE_CLOUDFLARE} -eq 1 ]]; then
+echo "=============================================================="
+echo " CLOUDFLARE"
+echo "=============================================================="
+echo "Real IP Nginx:  ${CF_NGINX_CONF}"
+echo "Whitelist CF:   ${CF_DDOS_LIST}"
+echo "Aggiorna range: update-cloudflare-ips"
+echo "Cron:           ${CF_CRON} (lunedì 04:17)"
+echo
+fi
 echo "=============================================================="
 echo " ANTIDDOS"
 echo "=============================================================="
