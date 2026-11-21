@@ -1,4 +1,4 @@
-# Proxy Reverse Proxy + AntiDDoS — Ubuntu 22.04 LTS
+# Reverse Proxy + AntiDDoS — Ubuntu 22.04 LTS
 
 Installer interattivo per configurare una VPS **Ubuntu 22.04 LTS** come **reverse proxy HTTP Nginx**, con **Apache2 per il report** e **AntiDDoS basato su iptables**.
 
